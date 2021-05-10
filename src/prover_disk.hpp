@@ -54,7 +54,6 @@ public:
         this->filename = filename;
 
         std::ifstream disk_file(filename, std::ios::in | std::ios::binary);
-
         if (!disk_file.is_open()) {
             throw std::invalid_argument("Invalid file " + filename);
         }
@@ -170,6 +169,7 @@ public:
                 // and following one of them.
                 for (uint8_t table_index = 6; table_index > 1; table_index--) {
                     uint128_t line_point = ReadLinePoint(disk_file, table_index, position);
+		    this->line_points[LinePoint(table_index,position)] = line_point;
 
                     auto xy = Encoding::LinePointToSquare(line_point);
                     assert(xy.first >= xy.second);
@@ -181,6 +181,7 @@ public:
                     }
                 }
                 uint128_t new_line_point = ReadLinePoint(disk_file, 1, position);
+	        this->line_points[LinePoint(1,position)] = new_line_point;
                 auto x1x2 = Encoding::LinePointToSquare(new_line_point);
 
                 // The final two x values (which are stored in the same location) are hashed
@@ -201,6 +202,7 @@ public:
     // if there are multiple.
     LargeBits GetFullProof(const uint8_t* challenge, uint32_t index)
     {
+	//std::cout<< "[****] DiskProver::GetFullProof on file:" << this->filename << ", challenge:" << *challenge << ", index:"<< index << std::endl;
         LargeBits full_proof;
 
         std::lock_guard<std::mutex> l(_mtx);
@@ -241,12 +243,28 @@ private:
     std::vector<uint64_t> table_begin_pointers;
     std::vector<uint64_t> C2;
 
+    std::map<std::string, std::vector<uint64_t>> challenge_p7_entries;
+    struct LinePoint {
+	LinePoint(uint8_t t, uint64_t p) {
+		table_index = t;
+		position = p;
+	}
+	uint8_t table_index;
+	uint64_t position;
+	bool operator<(const LinePoint& lp)const {
+		return (table_index < lp.table_index) || \
+			(table_index==lp.table_index && position < lp.position);
+	}
+    };
+    std::map<LinePoint, uint128_t> line_points;
+
     // Reads exactly one line point (pair of two k bit back-pointers) from the given table.
     // The entry at index "position" is read. First, the park index is calculated, then
     // the park is read, and finally, entry deltas are added up to the position that we
     // are looking for.
     uint128_t ReadLinePoint(std::ifstream& disk_file, uint8_t table_index, uint64_t position)
     {
+	//std::cout<< "[****] DiskProver::ReadLinePoint on file:" << this->filename << ", table_index:" << table_index << ", position:"<< position << std::endl;
         uint64_t park_index = position / kEntriesPerPark;
         uint32_t park_size_bits = EntrySizes::CalculateParkSize(k, table_index) * 8;
         disk_file.seekg(table_begin_pointers[table_index] + (park_size_bits / 8) * park_index);
@@ -358,10 +376,23 @@ private:
     // Returns P7 table entries (which are positions into table P6), for a given challenge
     std::vector<uint64_t> GetP7Entries(std::ifstream& disk_file, const uint8_t* challenge)
     {
+	//std::cout<< "[****] DiskProver::GetP7Entries on file:" << this->filename << ", challenge:" << *challenge << std::endl;
         if (C2.empty()) {
             return std::vector<uint64_t>();
         }
         Bits challenge_bits = Bits(challenge, 256 / 8, 256);
+	auto challengeStr = challenge_bits.ToString();
+	auto iter = this->challenge_p7_entries.find(challengeStr);
+	auto needCache = false;
+	if (iter == this->challenge_p7_entries.end()) {
+		needCache = true;
+		//std::cout<< "[****] DiskProver::GetP7Entries on file:" << this->filename << ", challenge:" << challengeStr << " need cache" << std::endl;
+	} else {
+		//std::cout<< "[****] DiskProver::GetP7Entries on file:" << this->filename << ", challenge:" << challengeStr << " need remove" << std::endl;
+		auto result = iter->second;
+		this->challenge_p7_entries.erase(iter);
+		return result;
+	}
 
         // The first k bits determine which f7 matches with the challenge.
         const uint64_t f7 = challenge_bits.Slice(0, k).GetValue();
@@ -513,7 +544,9 @@ private:
         delete[] bit_mask;
         delete[] c1_entry_bytes;
         delete[] p7_park_buf;
-
+	if (needCache) {
+		this->challenge_p7_entries[challengeStr] = p7_entries;
+	}
         return p7_entries;
     }
 
@@ -598,7 +631,18 @@ private:
     // recursively calling GetInputs for table 4.
     std::vector<Bits> GetInputs(std::ifstream& disk_file, uint64_t position, uint8_t depth)
     {
-        uint128_t line_point = ReadLinePoint(disk_file, depth, position);
+	//std::cout<< "[****] DiskProver::GetInputs on file:" << this->filename << ", position:" << position << ", depth:" << depth << std::endl;
+        uint128_t line_point;
+	auto iter = this->line_points.find(LinePoint(depth, position));
+	if (iter == this->line_points.end()) {
+		std::cout<< "[****] DiskProver::GetInputs on file:" << this->filename << ", position:" << position << ", depth:" << uint16_t(depth) << " cache not hit" << std::endl;
+		line_point = ReadLinePoint(disk_file, depth, position);
+	} else {
+		line_point = iter->second;
+		std::cout<< "[****] DiskProver::GetInputs on file:" << this->filename << ", position:" << position << ", depth:" << uint16_t(depth) << " cache hit" << std::endl;
+		this->line_points.erase(iter);
+	}
+
         std::pair<uint64_t, uint64_t> xy = Encoding::LinePointToSquare(line_point);
 
         if (depth == 1) {
