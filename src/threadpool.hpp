@@ -65,6 +65,7 @@ struct TaskReq {
 struct TaskResp {
     std::vector<Bits> value;
     int ec;
+    string msg;
 };
 
 struct Task {
@@ -189,11 +190,13 @@ public:
     {
         TaskResp* rsp = new TaskResp();
         rsp->ec = 0;
+        rsp->msg = "";
         try {
             rsp->value = GetInputs(
                 req->filename, req->position, req->table_begin_pointers, req->depth, req->k);
         } catch (const std::exception& e) {
             rsp->ec = 1;
+            rsp->msg = e.what();
         }
 
         delete req;
@@ -201,7 +204,7 @@ public:
     }
 };
 
-ThreadPool pool(32);
+ThreadPool pool(64);
 // by yeon.guo
 // TODO. pool.shutdown
 
@@ -235,10 +238,10 @@ std::vector<Bits> GetInputs(
         auto rsp_right = fu_right->get();
 
         if (rsp_left->ec != 0) {
-            throw std::logic_error("get inputs from pool failed, error_code " + rsp_left->ec); 
+            throw std::logic_error("get inputs from pool failed, error_msg " + rsp_left->msg); 
         }
         if (rsp_right->ec != 0) {
-            throw std::logic_error("get inputs from pool failed, error_code " + rsp_right->ec); 
+            throw std::logic_error("get inputs from pool failed, error_msg " + rsp_right->msg); 
         }
         std::vector<Bits> left = rsp_left->value;    // y
         std::vector<Bits> right = rsp_right->value;  // x
@@ -263,15 +266,11 @@ uint128_t ReadLinePoint(
     disk_file.seekg(table_begin_pointers[table_index] + (park_size_bits / 8) * park_index);
 
     // by yeon.guo
-    // emit to thread pool, filename, position, length
-    // TODO. deltas uncompressed read
-
-    // by yeon.guo
-    // TODO. memory leak
-
-    // by yeon.guo
     auto* buffer = new uint8_t[10240];
     disk_file.read(reinterpret_cast<char*>(buffer), 10240);
+    if (disk_file.eof() || disk_file.fail()) {
+        throw std::invalid_argument("read disk file failed");
+    }
 
     // This is the checkpoint at the beginning of the park
     uint16_t line_point_size = EntrySizes::CalculateLinePointSize(k);
@@ -337,6 +336,8 @@ uint128_t ReadLinePoint(
         deltas = Encoding::ANSDecodeDeltas(deltas_bin, encoded_deltas_size, kEntriesPerPark - 1, R);
     }
     total_size += encoded_deltas_size;
+
+    // std::cout << line_point_size << "," << stubs_size_bits / 8 << "," << sizeof(uint16_t) << "," << encoded_deltas_size << "," << total_size << std::endl;
 
     uint32_t start_bit = 0;
     uint8_t stub_size = k - kStubMinusBits;

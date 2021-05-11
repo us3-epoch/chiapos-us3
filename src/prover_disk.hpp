@@ -621,10 +621,10 @@ private:
             auto rsp_right = fu_right->get();
 
             if (rsp_left->ec != 0) {
-                throw std::logic_error("get inputs from pool failed, error_code " + rsp_left->ec); 
+                throw std::logic_error("get inputs from pool failed, error_msg " + rsp_left->msg); 
             }
             if (rsp_right->ec != 0) {
-                throw std::logic_error("get inputs from pool failed, error_code " + rsp_right->ec); 
+                throw std::logic_error("get inputs from pool failed, error_msg " + rsp_right->msg); 
             }
             std::vector<Bits> left = rsp_left->value;  // y
             std::vector<Bits> right = rsp_right->value;  // x
