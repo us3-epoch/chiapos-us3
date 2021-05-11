@@ -251,18 +251,6 @@ private:
     std::vector<uint64_t> C2;
 
     std::map<std::string, std::vector<uint64_t>> challenge_p7_entries;
-    struct LinePoint {
-	LinePoint(uint8_t t, uint64_t p) {
-		table_index = t;
-		position = p;
-	}
-	uint8_t table_index;
-	uint64_t position;
-	bool operator<(const LinePoint& lp)const {
-		return (table_index < lp.table_index) || \
-			(table_index==lp.table_index && position < lp.position);
-	}
-    };
     std::map<LinePoint, uint128_t> line_points;
 
     // Reads exactly one line point (pair of two k bit back-pointers) from the given table.
@@ -271,7 +259,6 @@ private:
     // are looking for.
     uint128_t ReadLinePoint(std::ifstream& disk_file, uint8_t table_index, uint64_t position)
     {
-	//std::cout<< "[****] DiskProver::ReadLinePoint on file:" << this->filename << ", table_index:" << table_index << ", position:"<< position << std::endl;
         uint64_t park_index = position / kEntriesPerPark;
         uint32_t park_size_bits = EntrySizes::CalculateParkSize(k, table_index) * 8;
         disk_file.seekg(table_begin_pointers[table_index] + (park_size_bits / 8) * park_index);
@@ -636,18 +623,14 @@ private:
     // all of the leaves (x values). For example, for depth=5, it fetches the position-th
     // entry in table 5, reading the two back pointers from the line point, and then
     // recursively calling GetInputs for table 4.
-    std::vector<Bits> GetInputs(std::ifstream& disk_file, uint64_t position, uint8_t depth)
+    std::vector<Bits> GetInputs(std::ifstream& disk_file, uint64_t position, uint8_t depth, bool gclp = false)
     {
-	//std::cout<< "[****] DiskProver::GetInputs on file:" << this->filename << ", position:" << position << ", depth:" << depth << std::endl;
         uint128_t line_point;
 	auto iter = this->line_points.find(LinePoint(depth, position));
 	if (iter == this->line_points.end()) {
-		std::cout<< "[****] DiskProver::GetInputs on file:" << this->filename << ", position:" << position << ", depth:" << uint16_t(depth) << " cache not hit" << std::endl;
 		line_point = ReadLinePoint(disk_file, depth, position);
 	} else {
 		line_point = iter->second;
-		std::cout<< "[****] DiskProver::GetInputs on file:" << this->filename << ", position:" << position << ", depth:" << uint16_t(depth) << " cache hit" << std::endl;
-		this->line_points.erase(iter);
 	}
 
         std::pair<uint64_t, uint64_t> xy = Encoding::LinePointToSquare(line_point);
@@ -657,22 +640,22 @@ private:
             std::vector<Bits> ret;
             ret.emplace_back(xy.second, k);  // y
             ret.emplace_back(xy.first, k);   // x
+	    if (gclp) {
+	        this->line_points.clear();
+	    }
             return ret;
         } else {
-            auto fu_left = pool.submit(filename, xy.second, table_begin_pointers, depth-1, k);
-            auto fu_right = pool.submit(filename, xy.first, table_begin_pointers, depth-1, k);
+            auto fu_left = pool.submit(filename, xy.second, table_begin_pointers, depth-1, k, this->line_points);
+            auto right = GetInputs(disk_file, xy.first, depth-1, true);
             auto rsp_left = fu_left->get();
-            auto rsp_right = fu_right->get();
-
             if (rsp_left->ec != 0) {
                 throw std::logic_error("get inputs from pool failed, error_msg " + rsp_left->msg); 
             }
-            if (rsp_right->ec != 0) {
-                throw std::logic_error("get inputs from pool failed, error_msg " + rsp_right->msg); 
-            }
             std::vector<Bits> left = rsp_left->value;  // y
-            std::vector<Bits> right = rsp_right->value;  // x
             left.insert(left.end(), right.begin(), right.end());
+	    if (gclp) {
+	        this->line_points.clear();
+	    }
             return left;
         }
     }

@@ -12,6 +12,19 @@
 
 class DiskProver;
 
+struct LinePoint {
+    LinePoint(uint8_t t, uint64_t p) {
+        table_index = t;
+        position = p;
+    }
+    uint8_t table_index;
+    uint64_t position;
+    bool operator<(const LinePoint& lp)const {
+        return (table_index < lp.table_index) || \
+            (table_index==lp.table_index && position < lp.position);
+    }
+};
+
 template <typename T>
 class SafeQueue {
 private:
@@ -57,9 +70,11 @@ public:
 struct TaskReq {
     std::string filename;
     uint64_t position;
-    std::vector<uint64_t> table_begin_pointers;
+    std::vector<uint64_t>& table_begin_pointers;
     uint8_t depth;
     uint8_t k;
+    std::map<LinePoint, uint128_t>& line_points;
+    TaskReq(std::vector<uint64_t>& t,std::map<LinePoint, uint128_t>& l): table_begin_pointers(t), line_points(l) {}
 };
 
 struct TaskResp {
@@ -78,7 +93,9 @@ std::vector<Bits> GetInputs(
     uint64_t position,
     std::vector<uint64_t>& table_begin_pointers,
     uint8_t depth,
-    uint8_t k);
+    uint8_t k,
+    std::map<LinePoint, uint128_t>& line_points);
+
 uint128_t ReadLinePoint(
     std::ifstream& disk_file,
     std::vector<uint64_t>& table_begin_pointers,
@@ -167,12 +184,12 @@ public:
         uint64_t position,
         std::vector<uint64_t>& table_begin_pointers,
         uint8_t depth,
-        uint8_t k)
+        uint8_t k,
+	std::map<LinePoint, uint128_t>& line_points)
     {
-        TaskReq* req = new TaskReq();
+        TaskReq* req = new TaskReq(table_begin_pointers, line_points);
         req->filename = filename;
         req->position = position;
-        req->table_begin_pointers = table_begin_pointers;
         req->depth = depth;
         req->k = k;
 
@@ -193,7 +210,7 @@ public:
         rsp->msg = "";
         try {
             rsp->value = GetInputs(
-                req->filename, req->position, req->table_begin_pointers, req->depth, req->k);
+                req->filename, req->position, req->table_begin_pointers, req->depth, req->k, req->line_points);
         } catch (const std::exception& e) {
             rsp->ec = 1;
             rsp->msg = e.what();
@@ -214,15 +231,22 @@ std::vector<Bits> GetInputs(
     uint64_t position,
     std::vector<uint64_t>& table_begin_pointers,
     uint8_t depth,
-    uint8_t k)
+    uint8_t k,
+    std::map<LinePoint, uint128_t>& line_points)
 {
-    std::ifstream disk_file(filename, std::ios::in | std::ios::binary);
-
-    if (!disk_file.is_open()) {
-        throw std::invalid_argument("Invalid file " + filename);
+    uint128_t line_point;
+    auto iter = line_points.find(LinePoint(depth, position));
+    if (iter == line_points.end()) {
+        std::ifstream disk_file(filename, std::ios::in | std::ios::binary);
+        if (!disk_file.is_open()) {
+            throw std::invalid_argument("Invalid file " + filename);
+        }
+        line_point = ReadLinePoint(disk_file, table_begin_pointers, depth, position, k);
+    } else {
+        line_point = iter->second;
     }
 
-    uint128_t line_point = ReadLinePoint(disk_file, table_begin_pointers, depth, position, k);
+
     std::pair<uint64_t, uint64_t> xy = Encoding::LinePointToSquare(line_point);
 
     if (depth == 1) {
@@ -232,19 +256,14 @@ std::vector<Bits> GetInputs(
         ret.emplace_back(xy.first, k);   // x
         return ret;
     } else {
-        auto fu_left = pool.submit(filename, xy.second, table_begin_pointers, depth - 1, k);
-        auto fu_right = pool.submit(filename, xy.first, table_begin_pointers, depth - 1, k);
+        auto fu_left = pool.submit(filename, xy.second, table_begin_pointers, depth - 1, k, line_points);
+	auto right = GetInputs(filename, xy.first, table_begin_pointers, depth - 1, k, line_points);
         auto rsp_left = fu_left->get();
-        auto rsp_right = fu_right->get();
-
         if (rsp_left->ec != 0) {
             throw std::logic_error("get inputs from pool failed, error_msg " + rsp_left->msg); 
         }
-        if (rsp_right->ec != 0) {
-            throw std::logic_error("get inputs from pool failed, error_msg " + rsp_right->msg); 
-        }
+
         std::vector<Bits> left = rsp_left->value;    // y
-        std::vector<Bits> right = rsp_right->value;  // x
         left.insert(left.end(), right.begin(), right.end());
 
         return left;
