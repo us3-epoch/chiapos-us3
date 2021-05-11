@@ -65,7 +65,7 @@ struct TaskReq {
 struct TaskResp {
     std::vector<Bits> value;
     int ec;
-    string msg;
+    std::string msg;
 };
 
 struct Task {
