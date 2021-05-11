@@ -35,10 +35,6 @@
 #include "util.hpp"
 #include "threadpool.hpp"
 
-ThreadPool *pool = new ThreadPool(32);
-// by yeon.guo
-// TODO. pool.shutdown
-
 struct plot_header {
     uint8_t magic[19];
     uint8_t id[32];
@@ -258,47 +254,20 @@ private:
     // are looking for.
     uint128_t ReadLinePoint(std::ifstream& disk_file, uint8_t table_index, uint64_t position)
     {
-        uint64_t total_size{0};
-
         uint64_t park_index = position / kEntriesPerPark;
         uint32_t park_size_bits = EntrySizes::CalculateParkSize(k, table_index) * 8;
-        
-        // disk_file.seekg(table_begin_pointers[table_index] + (park_size_bits / 8) * park_index);
-
-        // by yeon.guo
-        // emit to thread pool, filename, position, length
-        // TODO. deltas uncompressed read
-
-        // by yeon.guo
-        // TODO. memory leak
-
-        // by yeon.guo
-        // auto* buffer = new uint8_t[10240];
-        // disk_file.read(reinterpret_cast<char*>(buffer), 10240);
-        auto fu = pool->submit(filename, table_begin_pointers[table_index] + (park_size_bits / 8) * park_index, 10240);
-        auto rsp = fu->get();
-        if (rsp->ec != 0) {
-            std::cout << "submit error" << std::endl;
-            throw std::invalid_argument("Invalid file " + filename);
-        }
-        auto *buffer = rsp->buffer;
+        disk_file.seekg(table_begin_pointers[table_index] + (park_size_bits / 8) * park_index);
 
         // This is the checkpoint at the beginning of the park
         uint16_t line_point_size = EntrySizes::CalculateLinePointSize(k);
         auto* line_point_bin = new uint8_t[line_point_size + 7];
-        // disk_file.read(reinterpret_cast<char*>(line_point_bin), line_point_size);
-        memcpy(reinterpret_cast<char*>(line_point_bin), reinterpret_cast<char*>(buffer)+total_size, line_point_size);
+        disk_file.read(reinterpret_cast<char*>(line_point_bin), line_point_size);
         uint128_t line_point = Util::SliceInt128FromBytes(line_point_bin, 0, k * 2);
-        total_size += line_point_size;
-        // std::cout << 1 << std::endl;
 
         // Reads EPP stubs
         uint32_t stubs_size_bits = EntrySizes::CalculateStubsSize(k) * 8;
         auto* stubs_bin = new uint8_t[stubs_size_bits / 8 + 7];
-        // disk_file.read(reinterpret_cast<char*>(stubs_bin), stubs_size_bits / 8);
-        memcpy(reinterpret_cast<char*>(stubs_bin), reinterpret_cast<char*>(buffer)+total_size, stubs_size_bits / 8);
-        total_size += stubs_size_bits/8;
-        // std::cout << 2 << std::endl;
+        disk_file.read(reinterpret_cast<char*>(stubs_bin), stubs_size_bits / 8);
 
         // Reads EPP deltas
         uint32_t max_deltas_size_bits = EntrySizes::CalculateMaxDeltasSize(k, table_index) * 8;
@@ -306,10 +275,7 @@ private:
 
         // Reads the size of the encoded deltas object
         uint16_t encoded_deltas_size = 0;
-        // disk_file.read(reinterpret_cast<char*>(&encoded_deltas_size), sizeof(uint16_t));
-        memcpy(reinterpret_cast<char*>(&encoded_deltas_size), reinterpret_cast<char*>(buffer)+total_size, sizeof(uint16_t));
-        total_size += sizeof(uint16_t);
-        // std::cout << 3 << std::endl << encoded_deltas_size << std::endl;
+        disk_file.read(reinterpret_cast<char*>(&encoded_deltas_size), sizeof(uint16_t));
 
         std::vector<uint8_t> deltas;
 
@@ -317,22 +283,16 @@ private:
             // Uncompressed
             encoded_deltas_size &= 0x7fff;
             deltas.resize(encoded_deltas_size);
-            // disk_file.read(reinterpret_cast<char*>(deltas.data()), encoded_deltas_size);
-            memcpy(reinterpret_cast<char*>(deltas.data()), reinterpret_cast<char*>(buffer)+total_size, encoded_deltas_size);
+            disk_file.read(reinterpret_cast<char*>(deltas.data()), encoded_deltas_size);
         } else {
             // Compressed
-            // disk_file.read(reinterpret_cast<char*>(deltas_bin), encoded_deltas_size);
-            memcpy(reinterpret_cast<char*>(deltas_bin), reinterpret_cast<char*>(buffer)+total_size, encoded_deltas_size);
-            // std::cout << 4 << std::endl;
+            disk_file.read(reinterpret_cast<char*>(deltas_bin), encoded_deltas_size);
 
             // Decodes the deltas
             double R = kRValues[table_index - 1];
             deltas =
                 Encoding::ANSDecodeDeltas(deltas_bin, encoded_deltas_size, kEntriesPerPark - 1, R);
         }
-        // std::cout << 5 << std::endl;
-        total_size += encoded_deltas_size;
-        // std::cout << "total size: " << total_size << ", " << line_point_size << ", " << stubs_size_bits/8 << ", " << sizeof(uint16_t) << ", " << encoded_deltas_size << ", " << max_deltas_size_bits / 8 << ", " << int(table_index) << std::endl;
 
         uint32_t start_bit = 0;
         uint8_t stub_size = k - kStubMinusBits;
@@ -655,8 +615,19 @@ private:
             ret.emplace_back(xy.first, k);   // x
             return ret;
         } else {
-            std::vector<Bits> left = GetInputs(disk_file, xy.second, depth - 1);  // y
-            std::vector<Bits> right = GetInputs(disk_file, xy.first, depth - 1);  // x
+            auto fu_left = pool.submit(filename, xy.second, table_begin_pointers, depth-1, k);
+            auto fu_right = pool.submit(filename, xy.first, table_begin_pointers, depth-1, k);
+            auto rsp_left = fu_left->get();
+            auto rsp_right = fu_right->get();
+
+            if (rsp_left->ec != 0) {
+                throw std::logic_error("get inputs from pool failed, error_code " + rsp_left->ec); 
+            }
+            if (rsp_right->ec != 0) {
+                throw std::logic_error("get inputs from pool failed, error_code " + rsp_right->ec); 
+            }
+            std::vector<Bits> left = rsp_left->value;  // y
+            std::vector<Bits> right = rsp_right->value;  // x
             left.insert(left.end(), right.begin(), right.end());
             return left;
         }
