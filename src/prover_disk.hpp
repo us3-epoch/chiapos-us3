@@ -33,6 +33,7 @@
 #include "encoding.hpp"
 #include "entry_sizes.hpp"
 #include "util.hpp"
+#include "threadpool.hpp"
 
 struct plot_header {
     uint8_t magic[19];
@@ -207,7 +208,13 @@ public:
 
         std::lock_guard<std::mutex> l(_mtx);
         {
+            // auto start = std::chrono::steady_clock::now();
+
             std::ifstream disk_file(filename, std::ios::in | std::ios::binary);
+
+            // auto end = std::chrono::steady_clock::now();
+            // std::chrono::duration<double> elapsed_seconds = end - start;
+            // std::cout << "open elapsed time: " << elapsed_seconds.count() << "s\n";
 
             if (!disk_file.is_open()) {
                 throw std::invalid_argument("Invalid file " + filename);
@@ -652,8 +659,19 @@ private:
             ret.emplace_back(xy.first, k);   // x
             return ret;
         } else {
-            std::vector<Bits> left = GetInputs(disk_file, xy.second, depth - 1);  // y
-            std::vector<Bits> right = GetInputs(disk_file, xy.first, depth - 1);  // x
+            auto fu_left = pool.submit(filename, xy.second, table_begin_pointers, depth-1, k);
+            auto fu_right = pool.submit(filename, xy.first, table_begin_pointers, depth-1, k);
+            auto rsp_left = fu_left->get();
+            auto rsp_right = fu_right->get();
+
+            if (rsp_left->ec != 0) {
+                throw std::logic_error("get inputs from pool failed, error_msg " + rsp_left->msg); 
+            }
+            if (rsp_right->ec != 0) {
+                throw std::logic_error("get inputs from pool failed, error_msg " + rsp_right->msg); 
+            }
+            std::vector<Bits> left = rsp_left->value;  // y
+            std::vector<Bits> right = rsp_right->value;  // x
             left.insert(left.end(), right.begin(), right.end());
             return left;
         }
