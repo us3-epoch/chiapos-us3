@@ -47,6 +47,7 @@
 #include "pos_constants.hpp"
 #include "sort_manager.hpp"
 #include "util.hpp"
+#include "us3_copy.hpp"
 
 #define B17PHASE23
 
@@ -382,11 +383,10 @@ public:
                 }
             } else {
                 if (!bCopied) {
-                    fs::copy(
-                        tmp_2_filename, final_2_filename, fs::copy_options::overwrite_existing, ec);
-                    if (ec.value() != 0) {
+		    int ret = US3Copy(tmp_2_filename, final_2_filename);
+                    if (ret != 0) {
                         std::cout << "Could not copy " << tmp_2_filename << " to "
-                                  << final_2_filename << ". Error " << ec.message()
+                                  << final_2_filename << ". Error " << strerror(ret)
                                   << ". Retrying in five minutes." << std::endl;
                     } else {
                         std::cout << "Copied final file from " << tmp_2_filename << " to "
