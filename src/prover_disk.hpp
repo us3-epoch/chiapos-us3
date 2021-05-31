@@ -33,6 +33,7 @@
 #include "encoding.hpp"
 #include "entry_sizes.hpp"
 #include "util.hpp"
+#include "threadpool.hpp"
 
 struct plot_header {
     uint8_t magic[19];
@@ -55,7 +56,6 @@ public:
         this->filename = filename;
 
         std::ifstream disk_file(filename, std::ios::in | std::ios::binary);
-
         if (!disk_file.is_open()) {
             throw std::invalid_argument("Invalid file " + filename);
         }
@@ -171,6 +171,7 @@ public:
                 // and following one of them.
                 for (uint8_t table_index = 6; table_index > 1; table_index--) {
                     uint128_t line_point = ReadLinePoint(disk_file, table_index, position);
+                    this->line_points[LinePoint(table_index,position)] = line_point;
 
                     auto xy = Encoding::LinePointToSquare(line_point);
                     assert(xy.first >= xy.second);
@@ -182,6 +183,7 @@ public:
                     }
                 }
                 uint128_t new_line_point = ReadLinePoint(disk_file, 1, position);
+                this->line_points[LinePoint(1,position)] = new_line_point;
                 auto x1x2 = Encoding::LinePointToSquare(new_line_point);
 
                 // The final two x values (which are stored in the same location) are hashed
@@ -241,6 +243,8 @@ private:
     uint8_t k;
     std::vector<uint64_t> table_begin_pointers;
     std::vector<uint64_t> C2;
+    std::map<std::string, std::vector<uint64_t>> challenge_p7_entries;
+    std::map<LinePoint, uint128_t> line_points;
 
     // Using this method instead of simply seeking will prevent segfaults that would arise when
     // continuing the process of looking up qualities.
@@ -400,6 +404,16 @@ private:
             return std::vector<uint64_t>();
         }
         Bits challenge_bits = Bits(challenge, 256 / 8, 256);
+	auto challengeStr = challenge_bits.ToString();
+	auto iter = this->challenge_p7_entries.find(challengeStr);
+	auto needCache = false;
+	if (iter == this->challenge_p7_entries.end()) {
+		needCache = true;
+	} else {
+		auto result = iter->second;
+		this->challenge_p7_entries.erase(iter);
+		return result;
+	}
 
         // The first k bits determine which f7 matches with the challenge.
         const uint64_t f7 = challenge_bits.Slice(0, k).GetValue();
@@ -551,7 +565,9 @@ private:
         delete[] bit_mask;
         delete[] c1_entry_bytes;
         delete[] p7_park_buf;
-
+	if (needCache) {
+		this->challenge_p7_entries[challengeStr] = p7_entries;
+	}
         return p7_entries;
     }
 
@@ -634,9 +650,16 @@ private:
     // all of the leaves (x values). For example, for depth=5, it fetches the position-th
     // entry in table 5, reading the two back pointers from the line point, and then
     // recursively calling GetInputs for table 4.
-    std::vector<Bits> GetInputs(std::ifstream& disk_file, uint64_t position, uint8_t depth)
+    std::vector<Bits> GetInputs(std::ifstream& disk_file, uint64_t position, uint8_t depth, bool gclp = true)
     {
-        uint128_t line_point = ReadLinePoint(disk_file, depth, position);
+        uint128_t line_point;
+	auto iter = this->line_points.find(LinePoint(depth, position));
+	if (iter == this->line_points.end()) {
+		line_point = ReadLinePoint(disk_file, depth, position);
+	} else {
+		line_point = iter->second;
+	}
+
         std::pair<uint64_t, uint64_t> xy = Encoding::LinePointToSquare(line_point);
 
         if (depth == 1) {
@@ -646,9 +669,17 @@ private:
             ret.emplace_back(xy.first, k);   // x
             return ret;
         } else {
-            std::vector<Bits> left = GetInputs(disk_file, xy.second, depth - 1);  // y
-            std::vector<Bits> right = GetInputs(disk_file, xy.first, depth - 1);  // x
+            auto fu_left = pool.submit(filename, xy.second, table_begin_pointers, depth-1, k, this->line_points);
+            auto right = GetInputs(disk_file, xy.first, depth-1, false);
+            auto rsp_left = fu_left->get();
+            if (rsp_left->ec != 0) {
+                throw std::logic_error("get inputs from pool failed, error_msg " + rsp_left->msg); 
+            }
+            std::vector<Bits> left = rsp_left->value;  // y
             left.insert(left.end(), right.begin(), right.end());
+	    if (gclp) {
+	        this->line_points.clear();
+	    }
             return left;
         }
     }
