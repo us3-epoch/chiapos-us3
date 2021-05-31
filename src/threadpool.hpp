@@ -306,102 +306,75 @@ uint128_t ReadLinePoint(
     uint64_t position,
     uint8_t k)
 {
-    uint64_t total_size{0};
+	uint64_t park_index = position / kEntriesPerPark;
+	uint32_t park_size_bits = EntrySizes::CalculateParkSize(k, table_index) * 8;
 
-    uint64_t park_index = position / kEntriesPerPark;
-    uint32_t park_size_bits = EntrySizes::CalculateParkSize(k, table_index) * 8;
+	SafeSeek(disk_file, table_begin_pointers[table_index] + (park_size_bits / 8) * park_index);
 
-    SafeSeek(disk_file, table_begin_pointers[table_index] + (park_size_bits / 8) * park_index);
+	// This is the checkpoint at the beginning of the park
+	uint16_t line_point_size = EntrySizes::CalculateLinePointSize(k);
+	auto* line_point_bin = new uint8_t[line_point_size + 7];
+	SafeRead(disk_file, line_point_bin, line_point_size);
+	uint128_t line_point = Util::SliceInt128FromBytes(line_point_bin, 0, k * 2);
 
-    // by yeon.guo
-    auto* buffer = new uint8_t[10240];
-    SafeRead(disk_file, buffer, 10240);
+	// Reads EPP stubs
+	uint32_t stubs_size_bits = EntrySizes::CalculateStubsSize(k) * 8;
+	auto* stubs_bin = new uint8_t[stubs_size_bits / 8 + 7];
+	SafeRead(disk_file, stubs_bin, stubs_size_bits / 8);
 
-    // This is the checkpoint at the beginning of the park
-    uint16_t line_point_size = EntrySizes::CalculateLinePointSize(k);
-    auto* line_point_bin = new uint8_t[line_point_size + 7];
-    memcpy(
-        reinterpret_cast<char*>(line_point_bin),
-        reinterpret_cast<char*>(buffer) + total_size,
-        line_point_size);
-    uint128_t line_point = Util::SliceInt128FromBytes(line_point_bin, 0, k * 2);
-    total_size += line_point_size;
+	// Reads EPP deltas
+	uint32_t max_deltas_size_bits = EntrySizes::CalculateMaxDeltasSize(k, table_index) * 8;
+	auto* deltas_bin = new uint8_t[max_deltas_size_bits / 8];
 
-    // Reads EPP stubs
-    uint32_t stubs_size_bits = EntrySizes::CalculateStubsSize(k) * 8;
-    auto* stubs_bin = new uint8_t[stubs_size_bits / 8 + 7];
-    memcpy(
-        reinterpret_cast<char*>(stubs_bin),
-        reinterpret_cast<char*>(buffer) + total_size,
-        stubs_size_bits / 8);
-    total_size += stubs_size_bits / 8;
+	// Reads the size of the encoded deltas object
+	uint16_t encoded_deltas_size = 0;
+	SafeRead(disk_file, (uint8_t*)&encoded_deltas_size, sizeof(uint16_t));
 
-    // Reads EPP deltas
-    uint32_t max_deltas_size_bits = EntrySizes::CalculateMaxDeltasSize(k, table_index) * 8;
-    auto* deltas_bin = new uint8_t[max_deltas_size_bits / 8];
+	if (encoded_deltas_size * 8 > max_deltas_size_bits) {
+	    throw std::invalid_argument("Invalid size for deltas: " + std::to_string(encoded_deltas_size));
+	}
 
-    // Reads the size of the encoded deltas object
-    uint16_t encoded_deltas_size = 0;
-    memcpy(
-        reinterpret_cast<char*>(&encoded_deltas_size),
-        reinterpret_cast<char*>(buffer) + total_size,
-        sizeof(uint16_t));
-    total_size += sizeof(uint16_t);
+	std::vector<uint8_t> deltas;
 
-    if (encoded_deltas_size * 8 > max_deltas_size_bits) {
-        throw std::invalid_argument("Invalid size for deltas: " + std::to_string(encoded_deltas_size));
-    }
+	if (0x8000 & encoded_deltas_size) {
+	    // Uncompressed
+	    encoded_deltas_size &= 0x7fff;
+	    deltas.resize(encoded_deltas_size);
+	    SafeRead(disk_file, deltas.data(), encoded_deltas_size);
+	} else {
+	    // Compressed
+	    SafeRead(disk_file, deltas_bin, encoded_deltas_size);
 
-    std::vector<uint8_t> deltas;
+	    // Decodes the deltas
+	    double R = kRValues[table_index - 1];
+	    deltas =
+	        Encoding::ANSDecodeDeltas(deltas_bin, encoded_deltas_size, kEntriesPerPark - 1, R);
+	}
 
-    if (0x8000 & encoded_deltas_size) {
-        // Uncompressed
-        encoded_deltas_size &= 0x7fff;
-        deltas.resize(encoded_deltas_size);
-        // by yeon.guo
-        // uncompressed data cannot calculate length, read from disk
-        SafeSeek(disk_file, table_begin_pointers[table_index] + (park_size_bits / 8) * park_index + total_size);
-        SafeRead(disk_file, deltas.data(), encoded_deltas_size);
-    } else {
-        // Compressed
-        memcpy(
-            reinterpret_cast<char*>(deltas_bin),
-            reinterpret_cast<char*>(buffer) + total_size,
-            encoded_deltas_size);
+	uint32_t start_bit = 0;
+	uint8_t stub_size = k - kStubMinusBits;
+	uint64_t sum_deltas = 0;
+	uint64_t sum_stubs = 0;
+	for (uint32_t i = 0;
+	     i < std::min((uint32_t)(position % kEntriesPerPark), (uint32_t)deltas.size());
+	     i++) {
+	    uint64_t stub = Util::EightBytesToInt(stubs_bin + start_bit / 8);
+	    stub <<= start_bit % 8;
+	    stub >>= 64 - stub_size;
 
-        // Decodes the deltas
-        double R = kRValues[table_index - 1];
-        deltas = Encoding::ANSDecodeDeltas(deltas_bin, encoded_deltas_size, kEntriesPerPark - 1, R);
-    }
-    total_size += encoded_deltas_size;
+	    sum_stubs += stub;
+	    start_bit += stub_size;
+	    sum_deltas += deltas[i];
+	}
 
-    // std::cout << line_point_size << "," << stubs_size_bits / 8 << "," << sizeof(uint16_t) << "," << encoded_deltas_size << "," << total_size << std::endl;
+	uint128_t big_delta = ((uint128_t)sum_deltas << stub_size) + sum_stubs;
+	uint128_t final_line_point = line_point + big_delta;
 
-    uint32_t start_bit = 0;
-    uint8_t stub_size = k - kStubMinusBits;
-    uint64_t sum_deltas = 0;
-    uint64_t sum_stubs = 0;
-    for (uint32_t i = 0;
-         i < std::min((uint32_t)(position % kEntriesPerPark), (uint32_t)deltas.size());
-         i++) {
-        uint64_t stub = Util::EightBytesToInt(stubs_bin + start_bit / 8);
-        stub <<= start_bit % 8;
-        stub >>= 64 - stub_size;
+	delete[] line_point_bin;
+	delete[] stubs_bin;
+	delete[] deltas_bin;
 
-        sum_stubs += stub;
-        start_bit += stub_size;
-        sum_deltas += deltas[i];
-    }
-
-    uint128_t big_delta = ((uint128_t)sum_deltas << stub_size) + sum_stubs;
-    uint128_t final_line_point = line_point + big_delta;
-
-    delete[] line_point_bin;
-    delete[] stubs_bin;
-    delete[] deltas_bin;
-    delete[] buffer;
-
-    return final_line_point;
+	return final_line_point;
 }
 
 #endif

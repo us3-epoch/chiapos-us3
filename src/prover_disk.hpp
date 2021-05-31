@@ -204,18 +204,11 @@ public:
     // if there are multiple.
     LargeBits GetFullProof(const uint8_t* challenge, uint32_t index)
     {
-	//std::cout<< "[****] DiskProver::GetFullProof on file:" << this->filename << ", challenge:" << *challenge << ", index:"<< index << std::endl;
         LargeBits full_proof;
 
         std::lock_guard<std::mutex> l(_mtx);
         {
-            // auto start = std::chrono::steady_clock::now();
-
             std::ifstream disk_file(filename, std::ios::in | std::ios::binary);
-
-            // auto end = std::chrono::steady_clock::now();
-            // std::chrono::duration<double> elapsed_seconds = end - start;
-            // std::cout << "open elapsed time: " << elapsed_seconds.count() << "s\n";
 
             if (!disk_file.is_open()) {
                 throw std::invalid_argument("Invalid file " + filename);
@@ -407,7 +400,6 @@ private:
     // Returns P7 table entries (which are positions into table P6), for a given challenge
     std::vector<uint64_t> GetP7Entries(std::ifstream& disk_file, const uint8_t* challenge)
     {
-	//std::cout<< "[****] DiskProver::GetP7Entries on file:" << this->filename << ", challenge:" << *challenge << std::endl;
         if (C2.empty()) {
             return std::vector<uint64_t>();
         }
@@ -417,9 +409,7 @@ private:
 	auto needCache = false;
 	if (iter == this->challenge_p7_entries.end()) {
 		needCache = true;
-		//std::cout<< "[****] DiskProver::GetP7Entries on file:" << this->filename << ", challenge:" << challengeStr << " need cache" << std::endl;
 	} else {
-		//std::cout<< "[****] DiskProver::GetP7Entries on file:" << this->filename << ", challenge:" << challengeStr << " need remove" << std::endl;
 		auto result = iter->second;
 		this->challenge_p7_entries.erase(iter);
 		return result;
@@ -660,7 +650,7 @@ private:
     // all of the leaves (x values). For example, for depth=5, it fetches the position-th
     // entry in table 5, reading the two back pointers from the line point, and then
     // recursively calling GetInputs for table 4.
-    std::vector<Bits> GetInputs(std::ifstream& disk_file, uint64_t position, uint8_t depth, bool gclp = false)
+    std::vector<Bits> GetInputs(std::ifstream& disk_file, uint64_t position, uint8_t depth, bool gclp = true)
     {
         uint128_t line_point;
 	auto iter = this->line_points.find(LinePoint(depth, position));
@@ -677,13 +667,10 @@ private:
             std::vector<Bits> ret;
             ret.emplace_back(xy.second, k);  // y
             ret.emplace_back(xy.first, k);   // x
-	    if (gclp) {
-	        this->line_points.clear();
-	    }
             return ret;
         } else {
             auto fu_left = pool.submit(filename, xy.second, table_begin_pointers, depth-1, k, this->line_points);
-            auto right = GetInputs(disk_file, xy.first, depth-1, true);
+            auto right = GetInputs(disk_file, xy.first, depth-1, false);
             auto rsp_left = fu_left->get();
             if (rsp_left->ec != 0) {
                 throw std::logic_error("get inputs from pool failed, error_msg " + rsp_left->msg); 
